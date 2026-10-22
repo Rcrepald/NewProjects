@@ -1,0 +1,4 @@
+anthropic>=1.17,<2
+python-telegram-bot[job-queue]>=22,<23
+faster-whisper>=1.2,<2
+openpyxl>=3.1,<4
