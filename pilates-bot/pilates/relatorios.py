@@ -8,7 +8,16 @@ from . import servico as s
 DIAS_SEMANA = ("segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo")
 
 
-def _linha_mensalidade(m: dict, hoje: date, mostrar_mes: bool = False) -> str:
+def _tem_equipe(conn) -> bool:
+    return len(s.professoras(conn)) > 1
+
+
+def _etiqueta(conn, professora: str) -> str:
+    """Marca alunos que não são da dona, ex.: ' [Amanda]'."""
+    return f" [{professora}]" if professora and _tem_equipe(conn) and professora != s.dona(conn) else ""
+
+
+def _linha_mensalidade(m: dict, hoje: date, mostrar_mes: bool = False, conn=None) -> str:
     venc = date.fromisoformat(m["vencimento"])
     status = s.situacao(m, m["pago"], hoje)
     marca = {"paga": "✅", "atrasada": "🔴", "em aberto": "⏳"}.get(status, "•")
@@ -22,7 +31,8 @@ def _linha_mensalidade(m: dict, hoje: date, mostrar_mes: bool = False) -> str:
     else:
         quando = f"vence {DIAS_SEMANA[venc.weekday()][:3]} {s.data_br(venc)}"
     valor = s.brl(m["saldo"]) if status != "paga" else s.brl(m["valor"])
-    return f"{marca} {m['nome']} — {valor} — {quando}{mes}{extra}"
+    tag = _etiqueta(conn, m.get("professora", "")) if conn is not None else ""
+    return f"{marca} {m['nome']}{tag} — {valor} — {quando}{mes}{extra}"
 
 
 def resumo_mes(conn, hoje: date, competencia: str | None = None) -> str:
@@ -41,10 +51,19 @@ def resumo_mes(conn, hoje: date, competencia: str | None = None) -> str:
         f"Recebido: {s.brl(recebido)}{pct} — {len(pagas)} pagas",
         f"Falta receber: {s.brl(falta)} — {len(pendentes)} pendentes",
     ]
+    if _tem_equipe(conn):
+        linhas.append("")
+        for prof in s.professoras(conn):
+            dela = [m for m in ms if m["professora"] == prof["nome"]]
+            if not dela:
+                continue
+            rec = sum(min(m["pago"], m["valor"]) for m in dela)
+            linhas.append(f"• Alunos da {prof['nome']}: previsto {s.brl(sum(m['valor'] for m in dela))}"
+                          f" · recebido {s.brl(rec)} · falta {s.brl(sum(m['saldo'] for m in dela))}")
     if pendentes:
         linhas.append("")
         linhas.append("*Pendentes:*")
-        linhas += [_linha_mensalidade(m, hoje) for m in pendentes]
+        linhas += [_linha_mensalidade(m, hoje, conn=conn) for m in pendentes]
 
     atrasadas_antes = s.mensalidades_com_saldo(conn, "m.competencia < ? AND m.vencimento < ?",
                                                (comp, hoje.isoformat()))
@@ -52,7 +71,7 @@ def resumo_mes(conn, hoje: date, competencia: str | None = None) -> str:
     if atrasadas_antes:
         linhas.append("")
         linhas.append(f"⚠️ *Atrasados de meses anteriores:* {s.brl(sum(m['saldo'] for m in atrasadas_antes))}")
-        linhas += [_linha_mensalidade(m, hoje, mostrar_mes=True) for m in atrasadas_antes]
+        linhas += [_linha_mensalidade(m, hoje, mostrar_mes=True, conn=conn) for m in atrasadas_antes]
 
     caixa = conn.execute(
         "SELECT COALESCE(forma, 'não informada') AS forma, SUM(valor) AS total FROM pagamentos"
@@ -62,7 +81,62 @@ def resumo_mes(conn, hoje: date, competencia: str | None = None) -> str:
         formas = ", ".join(f"{r['forma']} {s.brl(r['total'])}" for r in caixa)
         linhas.append("")
         linhas.append(f"💰 Entrou no caixa em {s.nome_mes(comp)}: {s.brl(total)} ({formas})")
+        comissoes = _comissoes_do_mes(conn, comp)
+        if comissoes:
+            total_com = sum(c["comissao"] for c in comissoes)
+            for c in comissoes:
+                linhas.append(f"💼 Comissão da {c['nome']} ({c['pct']:g}% do que os alunos dela pagaram): "
+                              f"{s.brl(c['comissao'])}")
+            linhas.append(f"🏠 Fica para o estúdio: {s.brl(total - total_com)}")
     return "\n".join(linhas)
+
+
+def _comissoes_do_mes(conn, comp: str) -> list[dict]:
+    """Comissão por professora sobre os pagamentos com data no mês (regime de caixa)."""
+    rows = conn.execute(
+        "SELECT pr.nome, pr.comissao AS pct, COALESCE(SUM(p.valor), 0) AS recebido,"
+        " COALESCE(SUM(p.comissao), 0) AS comissao, COUNT(p.id) AS qtd"
+        " FROM professoras pr LEFT JOIN pagamentos p ON p.professora = pr.nome AND substr(p.data, 1, 7) = ?"
+        " WHERE pr.dona = 0 GROUP BY pr.nome ORDER BY pr.nome", (comp,)).fetchall()
+    return [dict(r) for r in rows if r["qtd"] or r["pct"]]
+
+
+def comissoes(conn, hoje: date, competencia: str | None = None, professora: str | None = None) -> str:
+    """Extrato de comissão: cada pagamento dos alunos da professora no mês."""
+    comp = s.validar_competencia(competencia) if competencia else s.competencia_de(hoje)
+    equipe = [p for p in s.professoras(conn) if not p["dona"]]
+    if professora:
+        equipe = [s.encontrar_professora(conn, professora)]
+    if not equipe:
+        return "Não há professoras com comissão cadastradas."
+    blocos = []
+    for prof in equipe:
+        pags = conn.execute(
+            "SELECT p.*, a.nome AS aluno, m.competencia FROM pagamentos p JOIN alunos a ON a.id = p.aluno_id"
+            " LEFT JOIN mensalidades m ON m.id = p.mensalidade_id"
+            " WHERE p.professora = ? AND substr(p.data, 1, 7) = ? ORDER BY p.data, a.nome",
+            (prof["nome"], comp)).fetchall()
+        titulo = f"💼 *Comissão da {prof['nome']} — {s.nome_mes(comp)}*"
+        if not pags:
+            blocos.append(f"{titulo}\nNenhum pagamento de alunos dela neste mês.")
+            continue
+        linhas = [titulo]
+        for p in pags:
+            ref = f" ref. {s.nome_mes(p['competencia']).split('/')[0]}" if p["competencia"] else ""
+            linhas.append(f"• {s.data_br(p['data'])} {p['aluno']} — {s.brl(p['valor'])}{ref} → {s.brl(p['comissao'])}")
+        recebido = sum(p["valor"] for p in pags)
+        com = sum(p["comissao"] for p in pags)
+        linhas.append(f"Recebido dos alunos dela: {s.brl(recebido)}")
+        linhas.append(f"*Comissão a pagar: {s.brl(com)}* ({prof['comissao']:g}%)")
+        linhas.append(f"Fica para o estúdio: {s.brl(recebido - com)}")
+        abertos = [m for m in s.mensalidades_com_saldo(conn, "a.professora = ? AND m.competencia <= ?",
+                                                       (prof["nome"], comp)) if m["saldo"] > 0]
+        if abertos:
+            falta = sum(m["saldo"] for m in abertos)
+            linhas.append(f"Ainda a receber dos alunos dela: {s.brl(falta)} "
+                          f"(comissão futura de {s.brl(s.calcular_comissao(falta, prof['comissao']))})")
+        blocos.append("\n".join(linhas))
+    return "\n\n".join(blocos)
 
 
 def vencimentos(conn, hoje: date, inicio: str | None = None, fim: str | None = None) -> str:
@@ -81,7 +155,7 @@ def vencimentos(conn, hoje: date, inicio: str | None = None, fim: str | None = N
     linhas = [titulo]
     if abertas:
         linhas.append(f"A receber: {s.brl(sum(m['saldo'] for m in abertas))}")
-        linhas += [_linha_mensalidade(m, hoje) for m in abertas]
+        linhas += [_linha_mensalidade(m, hoje, conn=conn) for m in abertas]
     if pagas:
         linhas.append(f"Já pagaram adiantado: {', '.join(m['nome'] for m in pagas)} ✅")
     return "\n".join(linhas)
@@ -92,17 +166,23 @@ def atrasados(conn, hoje: date) -> str:
     if not ms:
         return "✅ Ninguém em atraso. Tudo em dia!"
     linhas = [f"🔴 *Em atraso* — total {s.brl(sum(m['saldo'] for m in ms))}"]
-    linhas += [_linha_mensalidade(m, hoje, mostrar_mes=True) for m in ms]
+    linhas += [_linha_mensalidade(m, hoje, mostrar_mes=True, conn=conn) for m in ms]
     return "\n".join(linhas)
 
 
-def lista_alunos(conn, hoje: date, quais: str = "ativos") -> str:
+def lista_alunos(conn, hoje: date, quais: str = "ativos", professora: str | None = None) -> str:
     where = {"ativos": "ativo = 1", "inativos": "ativo = 0"}.get(quais, "1=1")
-    alunos = conn.execute(f"SELECT * FROM alunos WHERE {where} ORDER BY nome").fetchall()
+    params: tuple = ()
+    if professora:
+        prof = s.encontrar_professora(conn, professora)["nome"]
+        where += " AND professora = ?"
+        params = (prof,)
+    alunos = conn.execute(f"SELECT * FROM alunos WHERE {where} ORDER BY nome", params).fetchall()
     if not alunos:
         return "Nenhum aluno cadastrado ainda." if quais != "inativos" else "Nenhum aluno inativo."
     comp = s.competencia_de(hoje)
-    linhas = [f"👥 *Alunos {quais}* ({len(alunos)})"]
+    de_quem = f" da {prof}" if professora else ""
+    linhas = [f"👥 *Alunos {quais}{de_quem}* ({len(alunos)})"]
     total = 0
     for a in alunos:
         m = s.mensalidades_com_saldo(conn, "m.aluno_id = ? AND m.competencia = ?", (a["id"], comp))
@@ -115,7 +195,8 @@ def lista_alunos(conn, hoje: date, quais: str = "ativos") -> str:
         if a["ativo"]:
             total += a["valor"]
         plano = f" · {a['plano']}" if a["plano"] else ""
-        linhas.append(f"#{a['id']} {a['nome']} — {s.brl(a['valor'])} dia {a['dia_vencimento']}{plano} — {st}")
+        tag = "" if professora else _etiqueta(conn, a["professora"])
+        linhas.append(f"#{a['id']} {a['nome']}{tag} — {s.brl(a['valor'])} dia {a['dia_vencimento']}{plano} — {st}")
     if quais != "inativos":
         linhas.append(f"\nSoma das mensalidades ativas: {s.brl(total)}")
     return "\n".join(linhas)
@@ -128,6 +209,10 @@ def ficha_aluno(conn, hoje: date, aluno_ref: str) -> str:
         f"Mensalidade: {s.brl(a['valor'])}, vence todo dia {a['dia_vencimento']}"
         + (f" · {a['plano']}" if a["plano"] else ""),
     ]
+    if _tem_equipe(conn):
+        prof = conn.execute("SELECT * FROM professoras WHERE nome = ?", (a["professora"],)).fetchone()
+        com = f" (comissão de {prof['comissao']:g}%)" if prof and prof["comissao"] else ""
+        linhas.append(f"Professora: {a['professora']}{com}")
     if a["telefone"]:
         linhas.append(f"Telefone: {a['telefone']}")
     if a["observacoes"]:
@@ -137,7 +222,7 @@ def ficha_aluno(conn, hoje: date, aluno_ref: str) -> str:
     abertas = [m for m in ms if m["saldo"] > 0]
     if abertas:
         linhas.append("\n*Em aberto:*")
-        linhas += [_linha_mensalidade(m, hoje, mostrar_mes=True) for m in abertas]
+        linhas += [_linha_mensalidade(m, hoje, mostrar_mes=True, conn=conn) for m in abertas]
     else:
         linhas.append("\n✅ Nada em aberto.")
     pags = conn.execute(
@@ -162,7 +247,8 @@ def pagamentos_periodo(conn, inicio: str, fim: str) -> str:
     linhas = [f"💰 *Recebimentos de {s.data_br(ini)} a {s.data_br(fim_d)}* — {s.brl(sum(p['valor'] for p in pags))}"]
     for p in pags:
         ref = f" ref. {s.nome_mes(p['competencia'])}" if p["competencia"] else ""
-        linhas.append(f"• {s.data_br(p['data'])} {p['nome']} — {s.brl(p['valor'])} {p['forma'] or ''}{ref}")
+        linhas.append(f"• {s.data_br(p['data'])} {p['nome']}{_etiqueta(conn, p['professora'])} — "
+                      f"{s.brl(p['valor'])} {p['forma'] or ''}{ref}")
     return "\n".join(linhas)
 
 
@@ -237,5 +323,8 @@ def aviso_diario(conn, hoje: date) -> str | None:
 
 def aviso_mensal(conn, hoje: date) -> str:
     anterior = s.somar_meses(s.competencia_de(hoje), -1)
-    return ("🗓️ Virou o mês! Fechamento e previsão:\n\n"
-            + resumo_mes(conn, hoje, anterior) + "\n\n" + resumo_mes(conn, hoje))
+    texto = ("🗓️ Virou o mês! Fechamento e previsão:\n\n"
+             + resumo_mes(conn, hoje, anterior) + "\n\n" + resumo_mes(conn, hoje))
+    if _comissoes_do_mes(conn, anterior):
+        texto += "\n\n" + comissoes(conn, hoje, anterior)
+    return texto

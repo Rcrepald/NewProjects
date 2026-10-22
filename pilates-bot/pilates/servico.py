@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS alunos (
     valor           INTEGER NOT NULL,
     dia_vencimento  INTEGER NOT NULL CHECK (dia_vencimento BETWEEN 1 AND 31),
     inicio_cobranca TEXT NOT NULL,
+    professora      TEXT NOT NULL DEFAULT '',
     ativo           INTEGER NOT NULL DEFAULT 1,
     observacoes     TEXT,
     criado_em       TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
@@ -46,8 +47,15 @@ CREATE TABLE IF NOT EXISTS pagamentos (
     data           TEXT NOT NULL,
     forma          TEXT,
     observacao     TEXT,
+    professora     TEXT NOT NULL DEFAULT '',
+    comissao       INTEGER NOT NULL DEFAULT 0,
     lote           TEXT NOT NULL,
     criado_em      TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+CREATE TABLE IF NOT EXISTS professoras (
+    nome     TEXT PRIMARY KEY,
+    comissao REAL NOT NULL DEFAULT 0,
+    dona     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_mens_venc ON mensalidades (vencimento);
 CREATE INDEX IF NOT EXISTS ix_pag_data ON pagamentos (data);
@@ -72,7 +80,22 @@ def conectar(caminho: Path | str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(ESQUEMA)
+    _migrar(conn)
     return conn
+
+
+def _migrar(conn: sqlite3.Connection) -> None:
+    """Acrescenta colunas novas em bancos criados por versões anteriores."""
+    novas = {
+        "alunos": [("professora", "TEXT NOT NULL DEFAULT ''")],
+        "pagamentos": [("professora", "TEXT NOT NULL DEFAULT ''"), ("comissao", "INTEGER NOT NULL DEFAULT 0")],
+    }
+    for tabela, colunas in novas.items():
+        existentes = {r["name"] for r in conn.execute(f"PRAGMA table_info({tabela})")}
+        for nome, tipo in colunas:
+            if nome not in existentes:
+                conn.execute(f"ALTER TABLE {tabela} ADD COLUMN {nome} {tipo}")
+    conn.commit()
 
 
 def brl(centavos: int) -> str:
@@ -151,6 +174,54 @@ def normalizar_forma(forma: str | None) -> str | None:
     return f
 
 
+# ---------------------------------------------------------------- professoras
+
+def sincronizar_professoras(conn, dona: str, equipe: dict[str, float]) -> None:
+    """Grava a dona (sem comissão) e a equipe com seus percentuais de comissão."""
+    conn.execute("UPDATE professoras SET dona = 0")
+    conn.execute("INSERT INTO professoras (nome, comissao, dona) VALUES (?, 0, 1)"
+                 " ON CONFLICT(nome) DO UPDATE SET comissao = 0, dona = 1", (dona,))
+    for nome, pct in equipe.items():
+        if normalizar(nome) == normalizar(dona):
+            continue
+        conn.execute("INSERT INTO professoras (nome, comissao) VALUES (?, ?)"
+                     " ON CONFLICT(nome) DO UPDATE SET comissao = excluded.comissao", (nome, pct))
+    # Alunos antigos, sem professora definida, ficam com a dona.
+    conn.execute("UPDATE alunos SET professora = ? WHERE professora = ''", (dona,))
+    conn.execute("UPDATE pagamentos SET professora = ? WHERE professora = ''", (dona,))
+    conn.commit()
+
+
+def professoras(conn) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM professoras ORDER BY dona DESC, nome").fetchall()
+
+
+def dona(conn) -> str:
+    row = conn.execute("SELECT nome FROM professoras WHERE dona = 1").fetchone()
+    return row["nome"] if row else ""
+
+
+def encontrar_professora(conn, nome: str | None) -> sqlite3.Row:
+    """Sem nome = a dona do estúdio."""
+    lista = professoras(conn)
+    if not nome:
+        for p in lista:
+            if p["dona"]:
+                return p
+        raise ErroNegocio("Nenhuma professora configurada.")
+    alvo = normalizar(nome)
+    achadas = [p for p in lista if normalizar(p["nome"]) == alvo] or \
+              [p for p in lista if normalizar(p["nome"]).startswith(alvo)]
+    if len(achadas) != 1:
+        nomes = ", ".join(p["nome"] for p in lista)
+        raise ErroNegocio(f"Professora '{nome}' não encontrada. Professoras do estúdio: {nomes}.")
+    return achadas[0]
+
+
+def calcular_comissao(valor: int, pct: float) -> int:
+    return round(valor * pct / 100)
+
+
 # ---------------------------------------------------------------- alunos
 
 def _todos_alunos(conn: sqlite3.Connection) -> list[sqlite3.Row]:
@@ -213,12 +284,13 @@ class NovoAluno:
     telefone: str | None = None
     plano: str | None = None
     observacoes: str | None = None
+    professora: str = ""
 
 
 def preparar_cadastro(conn, hoje: date, nome: str, valor: float, dia_vencimento: int,
                       telefone: str | None = None, plano: str | None = None,
                       primeira_competencia: str | None = None,
-                      observacoes: str | None = None) -> NovoAluno:
+                      observacoes: str | None = None, professora: str | None = None) -> NovoAluno:
     nome = " ".join((nome or "").split()).title()
     if not nome:
         raise ErroNegocio("Falta o nome do aluno.")
@@ -234,22 +306,23 @@ def preparar_cadastro(conn, hoje: date, nome: str, valor: float, dia_vencimento:
                           "Confirme se é outra pessoa e diferencie o nome (ex.: sobrenome).")
     inicio = validar_competencia(primeira_competencia) if primeira_competencia \
         else primeira_competencia_padrao(dia, hoje)
-    return NovoAluno(nome, valor_c, dia, inicio, telefone or None, plano or None, observacoes or None)
+    prof = encontrar_professora(conn, professora)["nome"]
+    return NovoAluno(nome, valor_c, dia, inicio, telefone or None, plano or None, observacoes or None, prof)
 
 
 def cadastrar_aluno(conn, hoje: date, novo: NovoAluno) -> int:
     cur = conn.execute(
-        "INSERT INTO alunos (nome, telefone, plano, valor, dia_vencimento, inicio_cobranca, observacoes)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO alunos (nome, telefone, plano, valor, dia_vencimento, inicio_cobranca, observacoes,"
+        " professora) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (novo.nome, novo.telefone, novo.plano, novo.valor, novo.dia_vencimento,
-         novo.inicio_cobranca, novo.observacoes),
+         novo.inicio_cobranca, novo.observacoes, novo.professora),
     )
     conn.commit()
     gerar_mensalidades(conn, hoje)
     return cur.lastrowid
 
 
-CAMPOS_EDITAVEIS = ("nome", "telefone", "plano", "valor", "dia_vencimento", "observacoes")
+CAMPOS_EDITAVEIS = ("nome", "telefone", "plano", "valor", "dia_vencimento", "observacoes", "professora")
 
 
 def preparar_edicao(conn, aluno_ref: str, alteracoes: dict) -> tuple[sqlite3.Row, dict]:
@@ -268,6 +341,8 @@ def preparar_edicao(conn, aluno_ref: str, alteracoes: dict) -> tuple[sqlite3.Row
                 raise ErroNegocio("O dia de vencimento precisa estar entre 1 e 31.")
         elif campo == "nome":
             valor = " ".join(str(valor).split()).title()
+        elif campo == "professora":
+            valor = encontrar_professora(conn, valor)["nome"]
         if aluno[campo] != valor:
             mudancas[campo] = valor
     if not mudancas:
@@ -361,7 +436,7 @@ def situacao(m: sqlite3.Row | dict, pago: int, hoje: date) -> str:
 def mensalidades_com_saldo(conn, where: str = "1=1", params: tuple = ()) -> list[dict]:
     """Mensalidades (não canceladas) com nome do aluno, total pago e saldo."""
     rows = conn.execute(
-        "SELECT m.*, a.nome, a.telefone, a.ativo,"
+        "SELECT m.*, a.nome, a.telefone, a.ativo, a.professora,"
         " COALESCE((SELECT SUM(p.valor) FROM pagamentos p WHERE p.mensalidade_id = m.id), 0) AS pago"
         " FROM mensalidades m JOIN alunos a ON a.id = m.aluno_id"
         f" WHERE m.cancelada = 0 AND ({where}) ORDER BY m.vencimento, a.nome",
@@ -441,6 +516,12 @@ class PlanoPagamento:
     parcelas: list[ParcelaPagamento]
     observacao: str | None
     sobra: int = 0
+    professora: str = ""
+    comissao_pct: float = 0
+
+    @property
+    def comissao(self) -> int:
+        return sum(calcular_comissao(p.aplicar, self.comissao_pct) for p in self.parcelas)
 
 
 def preparar_pagamento(conn, hoje: date, aluno_ref: str, valor: float | None = None,
@@ -508,8 +589,10 @@ def preparar_pagamento(conn, hoje: date, aluno_ref: str, valor: float | None = N
     if not parcelas:
         raise ErroNegocio("Não encontrei mensalidade para lançar esse pagamento.")
     total = sum(p.aplicar for p in parcelas)
+    prof = conn.execute("SELECT * FROM professoras WHERE nome = ?", (aluno["professora"],)).fetchone()
     return PlanoPagamento(aluno, data_pag, forma_n, total, parcelas, observacao or None,
-                          sobra=(restante or 0))
+                          sobra=(restante or 0), professora=aluno["professora"],
+                          comissao_pct=prof["comissao"] if prof else 0)
 
 
 def registrar_pagamento(conn, plano: PlanoPagamento) -> str:
@@ -524,9 +607,10 @@ def registrar_pagamento(conn, plano: PlanoPagamento) -> str:
             mid = conn.execute("SELECT id FROM mensalidades WHERE aluno_id = ? AND competencia = ?",
                                (plano.aluno["id"], p.competencia)).fetchone()[0]
         conn.execute(
-            "INSERT INTO pagamentos (aluno_id, mensalidade_id, valor, data, forma, observacao, lote)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (plano.aluno["id"], mid, p.aplicar, plano.data.isoformat(), plano.forma, plano.observacao, lote),
+            "INSERT INTO pagamentos (aluno_id, mensalidade_id, valor, data, forma, observacao, lote,"
+            " professora, comissao) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (plano.aluno["id"], mid, p.aplicar, plano.data.isoformat(), plano.forma, plano.observacao, lote,
+             plano.professora, calcular_comissao(p.aplicar, plano.comissao_pct)),
         )
     conn.commit()
     return lote

@@ -16,6 +16,23 @@ conversa por **texto ou áudio**, e o bot cadastra, registra, cobra e manda rela
 | "Dezembro a Carla paga 200" / "Janeiro a Bia tá de férias" | Ajusta ou isenta só aquele mês |
 | "A Júlia saiu" / "A Júlia voltou" | Inativa (para de cobrar) / reativa |
 | "Apaga o último pagamento do João" | Desfaz um lançamento errado |
+| "Cadastra a Paula, aluna da Amanda, 250, dia 15" | Aluno entra na carteira da Amanda |
+| "Quanto pago pra Amanda esse mês?" | Extrato da comissão: cada pagamento, total a pagar e o que fica para o estúdio |
+| "A Paula agora vai fazer aula com a Ellen" | Passa o aluno de uma carteira para outra |
+
+## Carteiras e comissão
+
+Cada aluno pertence a uma professora: a Ellen (dona) ou alguém da equipe, como a Amanda.
+Quem não for indicado no cadastro fica com a Ellen. A equipe e o percentual de comissão
+ficam no `.env` (`EQUIPE=Amanda:40`).
+
+- A comissão é calculada **sobre o que os alunos dela pagaram no mês**, pela data do
+  pagamento. Mensalidade atrasada que só é paga no mês seguinte entra na comissão do mês
+  em que o dinheiro entrou.
+- O valor da comissão fica **gravado em cada pagamento**. Se o percentual mudar, os meses
+  anteriores continuam iguais.
+- O resumo do mês mostra previsto e recebido separados por carteira, a comissão e quanto
+  fica para o estúdio. No dia 1º chega também o extrato da comissão do mês que fechou.
 
 **Nada é gravado sem confirmação.** Toda alteração aparece num resumo com os botões
 ✅ Confirmar / ❌ Cancelar. Também dá para responder "sim" ou "não".
@@ -23,10 +40,10 @@ conversa por **texto ou áudio**, e o bot cadastra, registra, cobra e manda rela
 **Avisos automáticos** (8h da manhã):
 - **Segunda-feira:** quem vence na semana e quem está atrasado.
 - **Outros dias:** só manda mensagem se alguém vence hoje ou venceu ontem sem pagar.
-- **Dia 1º:** fechamento do mês anterior e previsão do novo mês.
+- **Dia 1º:** fechamento do mês anterior, comissão da equipe e previsão do novo mês.
 - **Domingo, 20h:** backup com uma planilha Excel e o arquivo do sistema.
 
-Atalhos: `/resumo` `/semana` `/atrasados` `/alunos` `/backup` `/novo` `/ajuda`
+Atalhos: `/resumo` `/semana` `/atrasados` `/alunos` `/comissao` `/backup` `/novo` `/ajuda`
 
 ## Como funciona
 
@@ -62,7 +79,7 @@ dólares de crédito (o uso esperado é de poucos dólares por mês).
 git clone https://github.com/rcrepald/newprojects.git
 cd newprojects/pilates-bot
 bash deploy/instalar.sh      # 1ª vez: cria o .env e para
-nano .env                    # preencha TELEGRAM_TOKEN, ANTHROPIC_API_KEY, CHAVE_PIX
+nano .env                    # preencha TELEGRAM_TOKEN, ANTHROPIC_API_KEY, CHAVE_PIX e EQUIPE
 bash deploy/instalar.sh      # 2ª vez: instala e liga o serviço
 ```
 

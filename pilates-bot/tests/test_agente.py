@@ -37,6 +37,7 @@ def agente(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "teste")
     cfg = config.carregar(tmp_path)
     conn = s.conectar(":memory:")
+    s.sincronizar_professoras(conn, "Ellen", {"Amanda": 40})
     return ag.Agente(cfg, conn)
 
 
@@ -127,3 +128,7 @@ def test_parametros_da_api(agente):
     assert kw["fallbacks"] == "default"
     assert "server-side-fallback-2026-07-01" in kw["betas"]
     assert "[Hoje:" in kw["messages"][0]["content"][0]["text"]
+
+
+def test_equipe_no_prompt(agente):
+    assert "Amanda: professora da equipe, recebe 40% de comissão" in agente.sistema

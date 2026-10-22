@@ -43,6 +43,8 @@ class Ferramenta:
 ALUNO = {"type": "string", "description": "Nome do aluno (pode ser parcial) ou id no formato #12."}
 COMPETENCIA = {"type": "string", "description": "Mês de referência no formato AAAA-MM."}
 DATA = {"type": "string", "description": "Data no formato AAAA-MM-DD."}
+PROFESSORA = {"type": "string", "description": "Nome da professora responsável pelo aluno (carteira). "
+                                               "Omitir = a dona do estúdio."}
 
 
 # ---------------------------------------------------------------- escrita
@@ -50,8 +52,9 @@ DATA = {"type": "string", "description": "Data no formato AAAA-MM-DD."}
 def _cadastrar(conn, hoje, cfg, a):
     novo = s.preparar_cadastro(conn, hoje, a.get("nome"), a.get("valor", 0), a.get("dia_vencimento", 0),
                                a.get("telefone"), a.get("plano"), a.get("primeira_competencia"),
-                               a.get("observacoes"))
-    partes = [f"🆕 Cadastrar *{novo.nome}*",
+                               a.get("observacoes"), a.get("professora"))
+    de_quem = f" — aluno(a) da {novo.professora}" if len(s.professoras(conn)) > 1 else ""
+    partes = [f"🆕 Cadastrar *{novo.nome}*{de_quem}",
               f"   {s.brl(novo.valor)} por mês, vence todo dia {novo.dia_vencimento}"]
     if novo.plano:
         partes.append(f"   Plano: {novo.plano}")
@@ -82,6 +85,8 @@ def _pagamento(conn, hoje, cfg, a):
             situacao = f"parcial, ainda faltarão {s.brl(falta)}"
         partes.append(f"   → {s.nome_mes(p.competencia)} (venc. {s.data_br(p.vencimento)}): "
                       f"{s.brl(p.aplicar)} — {situacao}")
+    if plano.comissao:
+        partes.append(f"   💼 Comissão da {plano.professora}: {s.brl(plano.comissao)} ({plano.comissao_pct:g}%)")
     if plano.sobra:
         partes.append(f"   ⚠️ Sobram {s.brl(plano.sobra)} sem mensalidade para lançar.")
     if not plano.aluno["ativo"]:
@@ -96,7 +101,7 @@ def _pagamento(conn, hoje, cfg, a):
 def _editar(conn, hoje, cfg, a):
     aluno, mud = s.preparar_edicao(conn, a.get("aluno", ""), {c: a.get(c) for c in s.CAMPOS_EDITAVEIS})
     rotulos = {"nome": "Nome", "telefone": "Telefone", "plano": "Plano", "valor": "Valor",
-               "dia_vencimento": "Dia de vencimento", "observacoes": "Observações"}
+               "dia_vencimento": "Dia de vencimento", "observacoes": "Observações", "professora": "Professora"}
 
     def fmt(campo, v):
         return s.brl(v) if campo == "valor" and v is not None else (v if v not in (None, "") else "—")
@@ -199,8 +204,17 @@ FERRAMENTAS: list[Ferramenta] = [
     Ferramenta(
         "listar_alunos",
         "Lista alunos com valor, dia de vencimento, plano e situação do mês atual.",
-        {"quais": {"type": "string", "enum": ["ativos", "inativos", "todos"]}}, [], False,
-        lambda c, h, cfg, a: r.lista_alunos(c, h, a.get("quais") or "ativos"),
+        {"quais": {"type": "string", "enum": ["ativos", "inativos", "todos"]}, "professora": PROFESSORA},
+        [], False,
+        lambda c, h, cfg, a: r.lista_alunos(c, h, a.get("quais") or "ativos", a.get("professora")),
+    ),
+    Ferramenta(
+        "comissoes",
+        "Extrato da comissão das professoras da equipe num mês: cada pagamento dos alunos dela, "
+        "total recebido, comissão a pagar e o que fica para o estúdio. A comissão é sobre o que "
+        "foi pago no mês (data do pagamento). Sem competência = mês atual.",
+        {"competencia": COMPETENCIA, "professora": PROFESSORA}, [], False,
+        lambda c, h, cfg, a: r.comissoes(c, h, a.get("competencia"), a.get("professora")),
     ),
     Ferramenta(
         "ficha_aluno",
@@ -235,6 +249,7 @@ FERRAMENTAS: list[Ferramenta] = [
             "plano": {"type": "string", "description": "Ex.: 2x por semana."},
             "primeira_competencia": COMPETENCIA,
             "observacoes": {"type": "string"},
+            "professora": PROFESSORA,
         },
         ["nome", "valor", "dia_vencimento"], True, _cadastrar,
     ),
@@ -265,6 +280,7 @@ FERRAMENTAS: list[Ferramenta] = [
             "valor": {"type": "number"},
             "dia_vencimento": {"type": "integer"},
             "observacoes": {"type": "string"},
+            "professora": {"type": "string", "description": "Passa o aluno para a carteira de outra professora."},
         },
         ["aluno"], True, _editar,
     ),

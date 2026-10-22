@@ -31,8 +31,10 @@ Pode falar comigo por texto ou áudio, do seu jeito. Exemplos:
 • "Em dezembro a Carla paga só 200" / "Janeiro a Bia tá de férias, não cobra"
 • "A Júlia saiu do estúdio"
 • "Apaga o último pagamento do João, lancei errado"
+• "Cadastra a Paula, aluna da Amanda, 250, dia 15"
+• "Quanto tenho que pagar pra Amanda esse mês?"
 
-Atalhos: /resumo /semana /atrasados /alunos /backup /novo (começa conversa do zero)
+Atalhos: /resumo /semana /atrasados /alunos /comissao /backup /novo (começa conversa do zero)
 
 Tudo que eu for gravar, te mostro antes com ✅ Confirmar / ❌ Cancelar."""
 
@@ -66,6 +68,7 @@ class App:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.conn = servico.conectar(cfg.banco)
+        servico.sincronizar_professoras(self.conn, cfg.nome_professora, cfg.equipe)
         self.agente = Agente(cfg, self.conn)
 
     def hoje(self):
@@ -97,6 +100,7 @@ class App:
             "semana": lambda: relatorios.vencimentos(self.conn, h),
             "atrasados": lambda: relatorios.atrasados(self.conn, h),
             "alunos": lambda: relatorios.lista_alunos(self.conn, h),
+            "comissao": lambda: relatorios.comissoes(self.conn, h),
         }[cmd]()
         await enviar(ctx.bot, update.effective_chat.id, texto)
 
@@ -218,7 +222,8 @@ class App:
     def construir(self) -> Application:
         app = Application.builder().token(self.cfg.telegram_token).build()
         app.add_handler(CommandHandler(["start", "ajuda", "help"], self.start))
-        app.add_handler(CommandHandler(["resumo", "semana", "atrasados", "alunos"], self.comando_relatorio))
+        app.add_handler(CommandHandler(["resumo", "semana", "atrasados", "alunos", "comissao"],
+                                       self.comando_relatorio))
         app.add_handler(CommandHandler("novo", self.novo))
         app.add_handler(CommandHandler("backup", self.backup))
         app.add_handler(CallbackQueryHandler(self.botao))

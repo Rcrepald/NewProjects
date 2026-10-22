@@ -54,6 +54,14 @@ hoje; forma de pagamento pode ficar em branco).
 - Se a ferramenta disser que há mais de um aluno com aquele nome, pergunte qual.
 - Quando o resultado de uma ação chegar dizendo que foi cancelada, não refaça sozinha.
 - Assuntos fora do estúdio: responda com gentileza e brevidade, sem usar ferramentas.
+
+Professoras e carteiras de alunos:
+{equipe}
+- Cada aluno pertence à carteira de uma professora. No cadastro, se não for dito de quem é \
+o aluno, ele é da {professora}. Se a {professora} disser que é aluno de outra professora, \
+passe o nome dela no campo professora.
+- A comissão é calculada sozinha sobre o que os alunos da professora pagaram no mês (pela \
+data do pagamento). Para "quanto pago pra Amanda", use a ferramenta de comissões.
 """
 
 CONFIRMA = re.compile(r"^\s*(sim|s|pode|pode sim|confirma|confirmo|confirmado|ok|okay|isso|isso mesmo|"
@@ -94,9 +102,19 @@ class Agente:
         self.cfg = cfg
         self.conn = conn
         self.cliente = anthropic.AsyncAnthropic()
-        self.sistema = SISTEMA.format(professora=cfg.nome_professora)
+        self.sistema = SISTEMA.format(professora=cfg.nome_professora, equipe=self._texto_equipe())
         self.conversas: dict[int, Conversa] = {}
         self._contador = 0
+
+    def _texto_equipe(self) -> str:
+        linhas = []
+        for p in s.professoras(self.conn):
+            if p["dona"]:
+                linhas.append(f"- {p['nome']}: dona do estúdio.")
+            else:
+                linhas.append(f"- {p['nome']}: professora da equipe, recebe {p['comissao']:g}% de comissão "
+                              "sobre as mensalidades pagas pelos alunos dela.")
+        return "\n".join(linhas) or f"- {self.cfg.nome_professora}: dona do estúdio."
 
     # ------------------------------------------------------------ estado
 

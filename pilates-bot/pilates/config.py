@@ -30,6 +30,7 @@ class Config:
     nome_professora: str
     chave_pix: str
     whisper_modelo: str
+    equipe: dict[str, float]  # professora -> % de comissão
 
 
 def carregar(raiz: Path | None = None) -> Config:
@@ -51,4 +52,15 @@ def carregar(raiz: Path | None = None) -> Config:
         nome_professora=os.environ.get("NOME_PROFESSORA", "Ellen"),
         chave_pix=os.environ.get("CHAVE_PIX", ""),
         whisper_modelo=os.environ.get("WHISPER_MODELO", "small"),
+        equipe=_ler_equipe(os.environ.get("EQUIPE", "")),
     )
+
+
+def _ler_equipe(texto: str) -> dict[str, float]:
+    """'Amanda:40, Bia:35' -> {'Amanda': 40.0, 'Bia': 35.0}"""
+    equipe = {}
+    for item in texto.split(","):
+        if ":" in item:
+            nome, pct = item.split(":", 1)
+            equipe[nome.strip()] = float(pct.strip().rstrip("%").replace(",", "."))
+    return equipe

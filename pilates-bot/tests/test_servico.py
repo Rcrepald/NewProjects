@@ -10,7 +10,9 @@ HOJE = date(2026, 10, 22)
 
 @pytest.fixture
 def conn():
-    return s.conectar(":memory:")
+    c = s.conectar(":memory:")
+    s.sincronizar_professoras(c, "Ellen", {"Amanda": 40})
+    return c
 
 
 def cadastrar(conn, nome="Maria Souza", valor=280, dia=10, hoje=HOJE, **kw):
@@ -170,3 +172,76 @@ def test_mensagem_cobranca(conn):
     msg = r.mensagem_cobranca(conn, HOJE, "ana", "Ellen", "ellen@pix.com")
     assert "https://wa.me/5511988887777?text=" in msg
     assert "ficou em aberto" in msg and "ellen@pix.com" in msg
+
+
+# ---------------------------------------------------------------- equipe / comissão
+
+def test_cadastro_por_professora(conn):
+    cadastrar(conn, "Ana")
+    cadastrar(conn, "Paula", professora="amanda")
+    profs = dict(conn.execute("SELECT nome, professora FROM alunos").fetchall())
+    assert profs == {"Ana": "Ellen", "Paula": "Amanda"}
+    with pytest.raises(s.ErroNegocio, match="não encontrada"):
+        s.preparar_cadastro(conn, HOJE, "Zé", 100, 10, professora="Carol")
+
+
+def test_comissao_no_pagamento(conn):
+    cadastrar(conn, "Paula", 250, 25, professora="Amanda", primeira_competencia="2026-10")
+    cadastrar(conn, "Ana", 300, 25, primeira_competencia="2026-10")
+    plano = s.preparar_pagamento(conn, HOJE, "paula", valor=500)  # outubro + novembro
+    assert plano.comissao == 20000 and plano.professora == "Amanda"
+    s.registrar_pagamento(conn, plano)
+    s.registrar_pagamento(conn, s.preparar_pagamento(conn, HOJE, "ana"))
+    s.registrar_pagamento(conn, s.preparar_pagamento(conn, HOJE, "paula", valor=250,
+                                                     data_pagamento="2026-09-30"))  # outro mês
+    assert [p["comissao"] for p in conn.execute("SELECT comissao FROM pagamentos ORDER BY id")] == \
+        [10000, 10000, 0, 10000]
+
+    resumo = r.resumo_mes(conn, HOJE)
+    assert "Comissão da Amanda (40% do que os alunos dela pagaram): R$ 200,00" in resumo
+    assert "Fica para o estúdio: R$ 600,00" in resumo  # 500 + 300 - 200
+    assert "Alunos da Amanda: previsto R$ 250,00" in resumo
+
+    extrato = r.comissoes(conn, HOJE)
+    assert "Comissão a pagar: R$ 200,00" in extrato and "Paula" in extrato
+    assert "Ana" not in extrato
+    assert "Comissão a pagar: R$ 100,00" in r.comissoes(conn, HOJE, "2026-09")
+
+
+def test_comissao_fica_gravada_mesmo_se_percentual_mudar(conn):
+    cadastrar(conn, "Paula", 250, 25, professora="Amanda", primeira_competencia="2026-10")
+    s.registrar_pagamento(conn, s.preparar_pagamento(conn, HOJE, "paula"))
+    s.sincronizar_professoras(conn, "Ellen", {"Amanda": 50})
+    assert "R$ 100,00" in r.comissoes(conn, HOJE)
+    assert s.preparar_pagamento(conn, HOJE, "paula").comissao == 12500
+
+
+def test_transferir_aluno_de_professora(conn):
+    aid = cadastrar(conn, "Paula", 250, 25, primeira_competencia="2026-10")
+    aluno, mud = s.preparar_edicao(conn, "paula", {"professora": "amanda"})
+    assert mud == {"professora": "Amanda"}
+    s.editar_aluno(conn, HOJE, aid, mud)
+    assert s.preparar_pagamento(conn, HOJE, "paula").comissao == 10000
+    assert "[Amanda]" in r.lista_alunos(conn, HOJE)
+    assert "Paula" in r.lista_alunos(conn, HOJE, professora="Amanda")
+    assert "Professora: Amanda (comissão de 40%)" in r.ficha_aluno(conn, HOJE, "paula")
+
+
+def test_migracao_de_banco_antigo(tmp_path):
+    import sqlite3
+    caminho = tmp_path / "antigo.db"
+    velho = sqlite3.connect(caminho)
+    velho.executescript("""
+        CREATE TABLE alunos (id INTEGER PRIMARY KEY, nome TEXT NOT NULL, telefone TEXT, plano TEXT,
+            valor INTEGER NOT NULL, dia_vencimento INTEGER NOT NULL, inicio_cobranca TEXT NOT NULL,
+            ativo INTEGER NOT NULL DEFAULT 1, observacoes TEXT, criado_em TEXT, inativado_em TEXT);
+        CREATE TABLE pagamentos (id INTEGER PRIMARY KEY, aluno_id INTEGER NOT NULL, mensalidade_id INTEGER,
+            valor INTEGER NOT NULL, data TEXT NOT NULL, forma TEXT, observacao TEXT, lote TEXT NOT NULL,
+            criado_em TEXT);
+        INSERT INTO alunos (nome, valor, dia_vencimento, inicio_cobranca) VALUES ('Ana', 100, 5, '2026-10');
+    """)
+    velho.commit()
+    velho.close()
+    conn = s.conectar(caminho)
+    s.sincronizar_professoras(conn, "Ellen", {"Amanda": 40})
+    assert conn.execute("SELECT professora FROM alunos").fetchone()[0] == "Ellen"
